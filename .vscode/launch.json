@@ -1,0 +1,91 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    // -----------------------------------------------------------------------
+    // 拡張機能ホストで実行（F5 デバッグ）
+    // -----------------------------------------------------------------------
+    {
+      "name": "Run Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        // Proposed API を有効化（resolvers API が必要）
+        "--enable-proposed-api=kojira.vscode-remote-mosh"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/out/**/*.js"
+      ],
+      "preLaunchTask": "npm: compile",
+      "presentation": {
+        "reveal": "always",
+        "group": "extension",
+        "order": 1
+      }
+    },
+
+    // -----------------------------------------------------------------------
+    // webpack ビルド版で実行（本番に近い動作確認）
+    // -----------------------------------------------------------------------
+    {
+      "name": "Run Extension (webpack)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--enable-proposed-api=kojira.vscode-remote-mosh"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/dist/**/*.js"
+      ],
+      "preLaunchTask": "npm: webpack",
+      "presentation": {
+        "reveal": "always",
+        "group": "extension",
+        "order": 2
+      }
+    },
+
+    // -----------------------------------------------------------------------
+    // 拡張機能のテストを実行
+    // -----------------------------------------------------------------------
+    {
+      "name": "Extension Tests",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--extensionTestsPath=${workspaceFolder}/out/test/suite/index",
+        "--enable-proposed-api=kojira.vscode-remote-mosh"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/out/test/**/*.js"
+      ],
+      "preLaunchTask": "npm: compile",
+      "presentation": {
+        "reveal": "always",
+        "group": "test",
+        "order": 1
+      }
+    },
+
+    // -----------------------------------------------------------------------
+    // Node.js スクリプト単体デバッグ（mosh-client.ts のユニットテスト等）
+    // -----------------------------------------------------------------------
+    {
+      "name": "Debug Current File (Node)",
+      "type": "node",
+      "request": "launch",
+      "program": "${file}",
+      "outFiles": [
+        "${workspaceFolder}/out/**/*.js"
+      ],
+      "preLaunchTask": "npm: compile",
+      "presentation": {
+        "reveal": "always",
+        "group": "node",
+        "order": 1
+      }
+    }
+  ]
+}

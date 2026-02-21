@@ -1,0 +1,33 @@
+# Source files (compiled to dist/ via webpack)
+src/
+out/
+
+# Config & build tools
+.vscode/**
+!.vscode/extensions.json
+tsconfig.json
+webpack.config.js
+.eslintrc.json
+.eslintignore
+
+# node_modules: mostly excluded (webpack bundles JS deps).
+# BUT: ssh2 has native .node binaries that cannot be bundled by webpack,
+# so we include it (and its deps) for runtime loading.
+node_modules/
+!node_modules/ssh2/
+!node_modules/ssh2/**
+!node_modules/cpu-features/
+!node_modules/cpu-features/**
+!node_modules/nan/
+!node_modules/nan/**
+
+# Misc
+.gitignore
+.gitattributes
+*.vsix
+*.map
+CHANGELOG.md
+**/*.test.ts
+**/*.spec.ts
+**/test/**
+**/tests/**

@@ -1,0 +1,136 @@
+{
+  "name": "vscode-remote-mosh",
+  "displayName": "Remote - Mosh",
+  "description": "Open any folder on a remote machine over Mosh (Mobile Shell) — survives network drops and IP roaming.",
+  "version": "0.1.0",
+  "publisher": "kojira",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kojira/vscode-remote-mosh"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "remote",
+    "mosh",
+    "ssh",
+    "mobile shell",
+    "remote development"
+  ],
+  "icon": "images/icon.png",
+  "preview": true,
+  "enabledApiProposals": [
+    "resolvers"
+  ],
+  "activationEvents": [
+    "onResolveRemoteAuthority:mosh"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Remote - Mosh",
+      "properties": {
+        "remoteMosh.defaultUser": {
+          "type": "string",
+          "default": "",
+          "description": "Default SSH username for Mosh connections. If empty, the current system user is used.",
+          "markdownDescription": "Default SSH username for Mosh connections. If empty, uses the current OS username.\n\nExample: `ubuntu`"
+        },
+        "remoteMosh.defaultPort": {
+          "type": "number",
+          "default": 60001,
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Preferred UDP port for the Mosh connection (mosh-server will use this or the next available port in range 60001-61000).",
+          "markdownDescription": "Preferred UDP port for the Mosh connection.\n\nThe `mosh-server` will use this port or the next available one in the range `60001–61000`.\n\nMake sure this port range is open in your firewall."
+        },
+        "remoteMosh.identityFile": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the SSH private key file (identity file) for authentication. If empty, SSH agent or default keys (~/.ssh/id_rsa etc.) are used.",
+          "markdownDescription": "Path to the SSH private key file used for authentication.\n\nExample: `~/.ssh/id_ed25519`\n\nLeave empty to use the SSH agent or default key files (`~/.ssh/id_rsa`, `~/.ssh/id_ed25519`, etc.)."
+        },
+        "remoteMosh.serverPath": {
+          "type": "string",
+          "default": "mosh-server",
+          "description": "Path to the mosh-server binary on the remote host.",
+          "markdownDescription": "Path to the `mosh-server` binary on the **remote** host.\n\nExample: `/usr/bin/mosh-server`"
+        },
+        "remoteMosh.mtu": {
+          "type": "number",
+          "default": 500,
+          "minimum": 200,
+          "maximum": 1500,
+          "description": "UDP MTU (bytes) for the Mosh transport. Use 500 for mobile/unstable networks, 1400 for stable LAN.",
+          "markdownDescription": "UDP MTU (bytes) for the Mosh transport.\n\n- **500** (default): Mobile / unstable Wi-Fi / VPN\n- **1400**: Stable wired LAN"
+        },
+        "remoteMosh.logLevel": {
+          "type": "string",
+          "enum": [
+            "off",
+            "error",
+            "warn",
+            "info",
+            "debug",
+            "trace"
+          ],
+          "default": "info",
+          "description": "Log verbosity for the Remote-Mosh extension output channel."
+        }
+      }
+    },
+    "resourceLabelFormatters": [
+      {
+        "scheme": "vscode-remote",
+        "authority": "mosh+*",
+        "formatting": {
+          "label": "${path}",
+          "separator": "/",
+          "tildify": true,
+          "workspaceSuffix": "Mosh",
+          "authorityPrefix": "mosh"
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "webpack": "webpack --mode development",
+    "webpack:watch": "webpack --mode development --watch",
+    "fetch-proposed-api": "npx @vscode/dts dev resolvers",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "clean": "rimraf out dist"
+  },
+  "devDependencies": {
+    "@types/node": "^20.x",
+    "@types/ssh2": "^1.15.x",
+    "@types/vscode": "^1.109.0",
+    "@typescript-eslint/eslint-plugin": "^7.x",
+    "@typescript-eslint/parser": "^7.x",
+    "@vscode/dts": "^0.4.x",
+    "@vscode/vsce": "^3.x",
+    "copy-webpack-plugin": "^12.x",
+    "eslint": "^8.x",
+    "rimraf": "^5.x",
+    "ts-loader": "^9.x",
+    "typescript": "^5.x",
+    "webpack": "^5.x",
+    "webpack-cli": "^5.x"
+  },
+  "dependencies": {
+    "ssh2": "^1.x",
+    "mosh-wasm": "file:./mosh-wasm-pkg"
+  }
+}

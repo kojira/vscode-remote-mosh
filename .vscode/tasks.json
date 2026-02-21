@@ -1,0 +1,160 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    // -----------------------------------------------------------------------
+    // TypeScript ビルド（tsc -p ./ で out/ に出力）
+    // -----------------------------------------------------------------------
+    {
+      "label": "npm: compile",
+      "type": "npm",
+      "script": "compile",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      },
+      "problemMatcher": "$tsc"
+    },
+
+    // -----------------------------------------------------------------------
+    // TypeScript ウォッチモード（ファイル保存時に自動ビルド）
+    // -----------------------------------------------------------------------
+    {
+      "label": "npm: watch",
+      "type": "npm",
+      "script": "watch",
+      "isBackground": true,
+      "group": "build",
+      "presentation": {
+        "reveal": "never",
+        "panel": "shared"
+      },
+      "problemMatcher": {
+        "owner": "typescript",
+        "fileLocation": [
+          "relative",
+          "${workspaceFolder}"
+        ],
+        "pattern": "$tsc",
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\s*\\d{1,2}:\\d{2}:\\d{2}(?: AM| PM)? - File change detected\\. Starting incremental compilation\\.\\.\\.",
+          "endsPattern": "^\\s*\\d{1,2}:\\d{2}:\\d{2}(?: AM| PM)? - Compilation complete\\. Watching for file changes\\."
+        }
+      }
+    },
+
+    // -----------------------------------------------------------------------
+    // webpack ビルド（development モード、dist/ に出力）
+    // -----------------------------------------------------------------------
+    {
+      "label": "npm: webpack",
+      "type": "npm",
+      "script": "webpack",
+      "group": "build",
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      },
+      "problemMatcher": "$ts-webpack"
+    },
+
+    // -----------------------------------------------------------------------
+    // webpack ウォッチモード
+    // -----------------------------------------------------------------------
+    {
+      "label": "npm: webpack:watch",
+      "type": "npm",
+      "script": "webpack:watch",
+      "isBackground": true,
+      "group": "build",
+      "presentation": {
+        "reveal": "never",
+        "panel": "shared"
+      },
+      "problemMatcher": {
+        "owner": "webpack",
+        "pattern": {
+          "regexp": "^ERROR in (.+)$",
+          "file": 1
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^webpack .+ is watching",
+          "endsPattern": "^webpack .+ compiled"
+        }
+      }
+    },
+
+    // -----------------------------------------------------------------------
+    // クリーン（out/ と dist/ を削除）
+    // -----------------------------------------------------------------------
+    {
+      "label": "npm: clean",
+      "type": "npm",
+      "script": "clean",
+      "group": "build",
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+
+    // -----------------------------------------------------------------------
+    // Proposed API d.ts の取得
+    // -----------------------------------------------------------------------
+    {
+      "label": "Fetch Proposed API (resolvers)",
+      "type": "npm",
+      "script": "fetch-proposed-api",
+      "group": "none",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+
+    // -----------------------------------------------------------------------
+    // mosh-wasm ビルド（Rust → WASM）
+    // -----------------------------------------------------------------------
+    {
+      "label": "Build mosh-wasm",
+      "type": "shell",
+      "command": "wasm-pack build --target nodejs --out-dir ${workspaceFolder}/../mosh-wasm/crates/mosh-wasm/pkg",
+      "options": {
+        "cwd": "${workspaceFolder}/../mosh-wasm"
+      },
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": {
+        "owner": "rustc",
+        "fileLocation": [
+          "relative",
+          "${workspaceFolder}/../mosh-wasm"
+        ],
+        "pattern": [
+          {
+            "regexp": "^error(\\[(.+)\\])?: (.+)$",
+            "severity": 1,
+            "code": 2,
+            "message": 3
+          },
+          {
+            "regexp": "^\\s+-->\\s(.+):(\\d+):(\\d+)$",
+            "file": 1,
+            "line": 2,
+            "column": 3
+          }
+        ]
+      }
+    }
+  ]
+}
