@@ -1,7 +1,7 @@
 {
   "name": "vscode-remote-mosh",
   "displayName": "Remote - Mosh",
-  "description": "Open any folder on a remote machine over Mosh (Mobile Shell) — survives network drops and IP roaming.",
+  "description": "Open any folder on a remote machine over Mosh (Mobile Shell) \u2014 survives network drops and IP roaming.",
   "version": "0.1.0",
   "publisher": "kojira",
   "license": "MIT",
@@ -84,7 +84,7 @@
           "minimum": 1,
           "maximum": 65535,
           "description": "Preferred UDP port for the Mosh connection (mosh-server will use this or the next available port in range 60001-61000).",
-          "markdownDescription": "Preferred UDP port for the Mosh connection.\n\nThe `mosh-server` will use this port or the next available one in the range `60001–61000`.\n\nMake sure this port range is open in your firewall."
+          "markdownDescription": "Preferred UDP port for the Mosh connection.\n\nThe `mosh-server` will use this port or the next available one in the range `60001\u201361000`.\n\nMake sure this port range is open in your firewall."
         },
         "remoteMosh.identityFile": {
           "type": "string",
@@ -148,7 +148,9 @@
     "clean": "rimraf out dist"
   },
   "devDependencies": {
+    "@types/mocha": "^10.x",
     "@types/node": "^20.x",
+    "@types/sinon": "^17.x",
     "@types/ssh2": "^1.15.x",
     "@types/vscode": "^1.109.0",
     "@typescript-eslint/eslint-plugin": "^7.x",
@@ -157,14 +159,16 @@
     "@vscode/vsce": "^3.x",
     "copy-webpack-plugin": "^12.x",
     "eslint": "^8.x",
+    "mocha": ">=10.x",
     "rimraf": "^5.x",
+    "sinon": ">=17.x",
     "ts-loader": "^9.x",
     "typescript": "^5.x",
     "webpack": "^5.x",
     "webpack-cli": "^5.x"
   },
   "dependencies": {
-    "ssh2": "^1.x",
-    "mosh-wasm": "file:./mosh-wasm-pkg"
+    "mosh-wasm": "file:./mosh-wasm-pkg",
+    "ssh2": "^1.x"
   }
 }

@@ -9,23 +9,39 @@
  * activate()
  *   └─ registerRemoteAuthorityResolver('mosh', MoshRemoteAuthorityResolver)
  *         └─ resolve(authority, context)
- *               ├─ SSH でリモートに接続
- *               ├─ mosh-server を起動
- *               ├─ "MOSH CONNECT <port> <key>" を解析
- *               └─ ManagedResolvedAuthority を返す
- *                     └─ makeConnection()
- *                           └─ MoshMessagePassing（ManagedMessagePassing 実装）
- *                                 ├─ MoshClientWrapper（UDP socket + WASM）
- *                                 └─ VS Code RPC ⇄ mosh バイトストリーム
+ *               ├─ [Step 1] SSH 接続
+ *               ├─ [Step 2] mosh-server 起動（UDPトランスポート確立）
+ *               │              "MOSH CONNECT <port> <key>" をパース
+ *               ├─ [Step 3] VS Code Server 自動インストール・起動（SSH経由）
+ *               │              ~/.vscode-server/bin/<commit>/server.sh
+ *               └─ [Step 4] ManagedResolvedAuthority 返却
+ *                             makeConnection() → MoshMessagePassing
+ *                                   → MoshClientWrapper（UDP + WASM）
  * ```
+ *
+ * ## 接続シーケンス詳細
+ *
+ * 1. SSH でリモートに接続
+ * 2. SSH 経由で `mosh-server new -s -p <port>` を起動
+ *    → "MOSH CONNECT <udpPort> <key>" を取得
+ * 3. VS Code Server のセットアップ（インストール + 起動）
+ *    → アーキテクチャ確認 → curl でダウンロード → server.sh --start-server --port=0
+ *    → リッスンポートと接続トークンを取得
+ * 4. ManagedResolvedAuthority を VS Code に返す
+ *    → makeConnection() が呼ばれたら MoshClientWrapper（WASM + UDP）を使って接続
  */
 import * as vscode from 'vscode';
 import { initLogger, logger } from './logger';
 import { getMoshConfig, parseAuthority } from './config';
 import { MoshClientWrapper } from './mosh-client';
+import {
+  setupVsCodeServer,
+  parseMoshConnect,
+  getVsCodeCommit,
+  type VsCodeServerInfo,
+} from './server-installer';
 
-// SSH クライアント（接続確立用）
-// TODO: Phase 2 で ExecServer ベースの SSH 実装に置き換える
+// SSH クライアント
 import { Client as SshClient, ConnectConfig } from 'ssh2';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
@@ -79,8 +95,10 @@ function updateStatusBar(
 export function activate(context: vscode.ExtensionContext): void {
   initLogger(context);
   logger.info('Remote-Mosh extension activating...');
+  logger.info(`VS Code version: ${vscode.version}`);
+  logger.info(`VS Code commit: ${process.env['VSCODE_COMMIT'] ?? '(unknown)'}`);
 
-  // ステータスバーアイテムを作成（右側に表示）
+  // ステータスバーアイテムを作成（左側に表示）
   _statusBarItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Left,
     100
@@ -97,6 +115,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // コマンド: 出力チャンネルを開く
   context.subscriptions.push(
     vscode.commands.registerCommand('remoteMosh.showLog', () => {
+      logger.info('User opened Remote-Mosh log');
       logger.show();
     })
   );
@@ -119,6 +138,7 @@ export function activate(context: vscode.ExtensionContext): void {
   if (vscode.env.remoteName === 'mosh') {
     _connectedHost = vscode.env.remoteAuthority?.replace(/^mosh\+/, '') ?? 'remote';
     updateStatusBar('connected', _connectedHost);
+    logger.info(`Already in mosh session: ${_connectedHost}`);
   }
 
   logger.info('Remote-Mosh extension activated. Authority prefix: mosh');
@@ -145,10 +165,6 @@ export function deactivate(): void {
 async function _cmdConnect(): Promise<void> {
   const config = getMoshConfig();
 
-  // --- Step 1: ホスト入力 ---
-  // 最近接続したホストの履歴（workspaceState に保存）
-  // ※ activate スコープ外なので context は使えない。globalState はリゾルバー経由。
-  // シンプルに QuickPick で自由入力のみサポート。
   const hostInput = await vscode.window.showInputBox({
     title: 'Remote - Mosh: Connect to Host',
     prompt: 'Enter hostname (user@host, user@host:port, or host)',
@@ -157,24 +173,21 @@ async function _cmdConnect(): Promise<void> {
       if (!val || val.trim().length === 0) {
         return 'Hostname is required';
       }
-      // 最低限ホスト名部分が存在するか確認
       const trimmed = val.trim();
       const hostPart = trimmed.includes('@') ? trimmed.split('@').pop() : trimmed;
       if (!hostPart || hostPart.replace(/:\d+$/, '').trim().length === 0) {
         return 'Invalid hostname format';
       }
-      return undefined; // valid
+      return undefined;
     },
   });
 
   if (!hostInput) {
-    // キャンセル
     return;
   }
 
   const trimmedHost = hostInput.trim();
 
-  // --- Step 2: フォルダパス入力 ---
   const folderPath = await vscode.window.showInputBox({
     title: 'Remote - Mosh: Remote Folder',
     prompt: 'Enter the remote folder path to open',
@@ -185,14 +198,10 @@ async function _cmdConnect(): Promise<void> {
   });
 
   if (folderPath === undefined) {
-    // キャンセル
     return;
   }
 
   const remotePath = folderPath.trim() || '/';
-
-  // --- Step 3: VS Code リモートウィンドウを開く ---
-  // authority 形式: `mosh+user@hostname` or `mosh+user@hostname:port`
   const authority = `mosh+${trimmedHost}`;
   const uri = vscode.Uri.parse(`vscode-remote://${authority}${remotePath}`);
 
@@ -206,7 +215,10 @@ async function _cmdConnect(): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error('Failed to open remote folder:', message);
-    vscode.window.showErrorMessage(`Remote - Mosh: Failed to connect to ${trimmedHost}: ${message}`);
+    vscode.window.showErrorMessage(
+      `Remote - Mosh: Failed to connect to ${trimmedHost}: ${message}\n` +
+      'Check the Remote-Mosh log for details (Ctrl+Shift+P → "Remote-Mosh: Show Log").'
+    );
     updateStatusBar('disconnected');
   }
 }
@@ -223,7 +235,6 @@ async function _cmdDisconnect(): Promise<void> {
   if (answer === 'Disconnect') {
     logger.info('User requested disconnect from mosh session');
     updateStatusBar('disconnected');
-    // リモートウィンドウを閉じてローカルに戻る
     await vscode.commands.executeCommand('workbench.action.remote.close');
   }
 }
@@ -258,19 +269,22 @@ class MoshRemoteAuthorityResolver implements vscode.RemoteAuthorityResolver {
     authority: string,
     context: vscode.RemoteAuthorityResolverContext
   ): Promise<vscode.ResolverResult> {
-    logger.info(
-      `resolve() called: authority="${authority}", attempt=${context.resolveAttempt}`
-    );
+    logger.info('════════════════════════════════════════');
+    logger.info(`resolve() called: authority="${authority}"`);
+    logger.info(`resolve attempt: ${context.resolveAttempt}`);
+    logger.info('════════════════════════════════════════');
 
     const config = getMoshConfig();
     const { user, host, sshPort } = parseAuthority(authority);
     const sshUser = user || config.defaultUser;
 
-    logger.info(`Target: ${sshUser}@${host}:${sshPort} (mosh port: ${config.defaultPort})`);
+    logger.info(`[resolve] Target: ${sshUser}@${host}:${sshPort}`);
+    logger.info(`[resolve] Mosh preferred port: ${config.defaultPort}`);
+    logger.info(`[resolve] mosh-server path: ${config.serverPath}`);
 
     // 再接続の場合は既存セッションをクリーンアップ
     if (context.resolveAttempt > 0) {
-      logger.info(`Re-connecting (attempt ${context.resolveAttempt})...`);
+      logger.info(`[resolve] Re-connecting (attempt ${context.resolveAttempt}), cleaning up old session...`);
       const existing = this._sessions.get(authority);
       if (existing) {
         existing.dispose();
@@ -278,195 +292,319 @@ class MoshRemoteAuthorityResolver implements vscode.RemoteAuthorityResolver {
       }
     }
 
-    // ステータスバーに接続状態を表示
+    // VS Code コミットハッシュを取得
+    const vsCodeCommit = getVsCodeCommit();
+    if (!vsCodeCommit) {
+      logger.warn('[resolve] VS Code commit hash not available, VS Code Server version may mismatch');
+    }
+
+    let session: MoshSession | undefined;
+
     await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: `Remote-Mosh: Connecting to ${sshUser}@${host}...`,
+        title: `Remote-Mosh: Connecting to ${sshUser}@${host}`,
         cancellable: false,
       },
       async (progress) => {
-        progress.report({ message: 'Starting SSH session...' });
+        // ────────────────────────────────────────────────
+        // Step 1: SSH 接続
+        // ────────────────────────────────────────────────
+        progress.report({ message: '[1/4] Establishing SSH connection...' });
+        logger.info(`[Step 1/4] Connecting via SSH: ${sshUser}@${host}:${sshPort}`);
 
-        // SSH → mosh-server 起動 → "MOSH CONNECT <port> <key>" 取得
-        const moshInfo = await this._startMoshServer({
+        const sshClient = await this._createSshClient({
           host,
           port: sshPort,
           username: sshUser,
           identityFile: config.identityFile,
-          moshServerPath: config.serverPath,
-          preferredUdpPort: config.defaultPort,
         });
 
-        logger.info(
-          `mosh-server started: UDP port=${moshInfo.udpPort}, key=${moshInfo.key.substring(0, 8)}...`
-        );
-        progress.report({ message: `mosh-server on UDP ${moshInfo.udpPort}` });
+        logger.info('[Step 1/4] SSH connection established ✓');
 
-        // セッション情報を保存
-        const session = new MoshSession({
-          host,
-          udpPort: moshInfo.udpPort,
-          keyBase64: moshInfo.key,
-          mtu: config.mtu,
-        });
-        this._sessions.set(authority, session);
+        try {
+          // ────────────────────────────────────────────────
+          // Step 2: mosh-server 起動
+          // ────────────────────────────────────────────────
+          progress.report({ message: '[2/4] Starting mosh-server...' });
+          logger.info(`[Step 2/4] Starting mosh-server on ${host}...`);
+
+          const moshInfo = await this._startMoshServer(sshClient, {
+            moshServerPath: config.serverPath,
+            preferredUdpPort: config.defaultPort,
+          });
+
+          logger.info(`[Step 2/4] mosh-server started ✓ UDP port=${moshInfo.udpPort}`);
+
+          // ────────────────────────────────────────────────
+          // Step 3: VS Code Server セットアップ
+          // ────────────────────────────────────────────────
+          progress.report({ message: '[3/4] Setting up VS Code Server...' });
+          logger.info(`[Step 3/4] Setting up VS Code Server on ${host}...`);
+
+          let vsServerInfo: VsCodeServerInfo | undefined;
+
+          if (vsCodeCommit) {
+            try {
+              vsServerInfo = await setupVsCodeServer(
+                {
+                  sshClient,
+                  commit: vsCodeCommit,
+                  downloadTimeoutMs: 120_000,
+                  startTimeoutMs: 60_000,
+                },
+                (msg) => {
+                  progress.report({ message: `[3/4] ${msg}` });
+                  logger.info(`[Step 3/4] ${msg}`);
+                }
+              );
+              logger.info(
+                `[Step 3/4] VS Code Server ready ✓ port=${vsServerInfo.port}`
+              );
+            } catch (serverErr) {
+              logger.error('[Step 3/4] VS Code Server setup failed:', serverErr);
+              logger.warn('[Step 3/4] Continuing without VS Code Server (degraded mode)');
+              progress.report({ message: '[3/4] VS Code Server setup failed, continuing...' });
+            }
+          } else {
+            logger.warn('[Step 3/4] Skipping VS Code Server setup (no commit hash)');
+            progress.report({ message: '[3/4] Skipping VS Code Server setup...' });
+          }
+
+          // ────────────────────────────────────────────────
+          // Step 4: セッション情報を保存
+          // ────────────────────────────────────────────────
+          progress.report({ message: '[4/4] Establishing mosh connection...' });
+          logger.info(`[Step 4/4] Creating MoshSession for ${host}:${moshInfo.udpPort}`);
+
+          session = new MoshSession({
+            host,
+            udpPort: moshInfo.udpPort,
+            keyBase64: moshInfo.key,
+            mtu: config.mtu,
+            vsCodeServerInfo: vsServerInfo,
+          });
+
+          this._sessions.set(authority, session);
+          logger.info('[Step 4/4] MoshSession created ✓');
+
+        } finally {
+          // SSH 接続はここで終了（mosh は別の UDP チャンネルを使う）
+          sshClient.end();
+          logger.info('[resolve] SSH connection closed');
+        }
       }
     );
 
-    const session = this._sessions.get(authority);
-    if (!session) {
-      throw vscode.RemoteAuthorityResolverError.TemporarilyNotAvailable(
-        'Failed to start mosh-server'
-      );
+    const finalSession = this._sessions.get(authority);
+    if (!finalSession) {
+      const errMsg = 'Failed to establish mosh connection. Check the Remote-Mosh log for details.';
+      logger.error(`[resolve] ${errMsg}`);
+      throw vscode.RemoteAuthorityResolverError.TemporarilyNotAvailable(errMsg);
     }
 
-    // ManagedResolvedAuthority を返す
-    // makeConnection は VS Code が実際に接続チャンネルを開くときに呼ばれる
     const connectionToken = crypto.randomUUID();
+    logger.info(`[resolve] Returning ManagedResolvedAuthority (token: ${connectionToken.substring(0, 8)}...)`);
+
+    updateStatusBar('connected', host);
+
     return new vscode.ManagedResolvedAuthority(
-      () => session.makeConnection(),
+      () => finalSession.makeConnection(),
       connectionToken
     );
   }
 
   // -------------------------------------------------------------------------
-  // Private: mosh-server 起動（SSH 経由）
+  // Private: SSH クライアント作成
   // -------------------------------------------------------------------------
 
   /**
-   * SSH でリモートに接続し、mosh-server を起動して接続情報を返す。
-   *
-   * mosh-server の出力形式:
-   * `\r\nMOSH CONNECT <udpPort> <base64key>\r\n`
-   *
-   * @returns UDP ポートと AES-128 鍵（Base64）
+   * SSH 接続を確立して SshClient を返す。
    */
-  private async _startMoshServer(opts: {
+  private async _createSshClient(opts: {
     host: string;
     port: number;
     username: string;
     identityFile: string;
-    moshServerPath: string;
-    preferredUdpPort: number;
-  }): Promise<{ udpPort: number; key: string }> {
-    const { host, port, username, identityFile, moshServerPath, preferredUdpPort } = opts;
+  }): Promise<SshClient> {
+    const { host, port, username, identityFile } = opts;
 
-    return new Promise<{ udpPort: number; key: string }>((resolve, reject) => {
+    return new Promise<SshClient>((resolve, reject) => {
       const ssh = new SshClient();
-      let output = '';
-      let resolved = false;
+      let connected = false;
 
-      const cleanup = (err?: Error): void => {
-        if (!resolved) {
-          resolved = true;
+      const cleanup = (err: Error): void => {
+        if (!connected) {
+          connected = true;
           ssh.end();
-          if (err) {
-            reject(err);
-          }
+          reject(err);
         }
       };
 
       ssh.on('ready', () => {
-        logger.debug('SSH connection ready');
-
-        // mosh-server 起動コマンド
-        // -p: 優先 UDP ポート
-        // -s: stdout に "MOSH CONNECT ..." を出力するモード
-        // -- /bin/sh -c 'exec ...': ログイン shell を介さずに直接実行
-        const moshCmd = [
-          moshServerPath,
-          'new',
-          '-s',
-          '-p', String(preferredUdpPort),
-          '--',
-          // vscode-server への接続は makeConnection() で行うため
-          // mosh-server はシェルを起動せずに待機する
-          // TODO: Phase 2 で vscode-server を起動するコマンドに変更
-          '/bin/bash',
-        ].join(' ');
-
-        logger.debug(`Starting mosh-server: ${moshCmd}`);
-
-        ssh.exec(moshCmd, { pty: false }, (err, stream) => {
-          if (err) {
-            cleanup(err);
-            return;
-          }
-
-          stream.on('data', (data: Buffer) => {
-            output += data.toString('utf8');
-            logger.trace(`mosh-server stdout: ${data.toString('utf8').trim()}`);
-
-            // "MOSH CONNECT <port> <key>" を探す
-            const match = output.match(/MOSH CONNECT (\d+) ([A-Za-z0-9+/=]{22,})/);
-            if (match && !resolved) {
-              resolved = true;
-              const udpPort = parseInt(match[1], 10);
-              const key = match[2];
-              logger.info(`mosh-server: UDP port=${udpPort}, key=${key.substring(0, 8)}...`);
-              ssh.end();
-              resolve({ udpPort, key });
-            }
-          });
-
-          stream.stderr.on('data', (data: Buffer) => {
-            logger.debug(`mosh-server stderr: ${data.toString('utf8').trim()}`);
-          });
-
-          stream.on('close', (code: number | null) => {
-            if (!resolved) {
-              cleanup(
-                new Error(
-                  `mosh-server exited with code ${code} before outputting "MOSH CONNECT". ` +
-                  `Output: ${output.trim()}`
-                )
-              );
-            }
-          });
-        });
+        connected = true;
+        logger.debug(`[SSH] Ready: ${username}@${host}:${port}`);
+        resolve(ssh);
       });
 
       ssh.on('error', (err: Error) => {
-        logger.error('SSH error:', err.message);
-        cleanup(err);
+        logger.error(`[SSH] Connection error: ${err.message}`);
+        const userFriendlyMsg = _makeSshErrorMessage(err, host, port, username);
+        cleanup(new Error(userFriendlyMsg));
       });
 
-      // SSH 接続設定を組み立てる
+      ssh.on('close', () => {
+        if (!connected) {
+          cleanup(new Error(`SSH connection to ${host}:${port} closed before ready`));
+        }
+      });
+
+      // SSH 接続設定
       const sshConfig: ConnectConfig = {
         host,
         port,
         username,
-        // タイムアウト: 15 秒
-        readyTimeout: 15_000,
+        readyTimeout: 20_000,  // 20秒でタイムアウト
+        keepaliveInterval: 10_000,
+        keepaliveCountMax: 3,
       };
 
-      // 秘密鍵ファイルが指定されていれば読み込む
+      // 秘密鍵の設定
       if (identityFile && fs.existsSync(identityFile)) {
-        logger.debug(`Using identity file: ${identityFile}`);
-        sshConfig.privateKey = fs.readFileSync(identityFile);
-      } else {
-        // SSH エージェントを使用
-        sshConfig.agent = process.env['SSH_AUTH_SOCK'];
-        if (!sshConfig.agent) {
-          // エージェントがなければデフォルト鍵を試みる
+        logger.debug(`[SSH] Using identity file: ${identityFile}`);
+        try {
+          sshConfig.privateKey = fs.readFileSync(identityFile);
+        } catch (readErr) {
+          logger.warn(`[SSH] Failed to read identity file: ${identityFile}`, readErr);
+        }
+      }
+
+      if (!sshConfig.privateKey) {
+        // SSH エージェントを試みる
+        const agentSock = process.env['SSH_AUTH_SOCK'];
+        if (agentSock) {
+          logger.debug(`[SSH] Using SSH agent: ${agentSock}`);
+          sshConfig.agent = agentSock;
+        } else {
+          // デフォルト鍵ファイルを探す
           const defaultKeys = [
             path.join(os.homedir(), '.ssh', 'id_ed25519'),
-            path.join(os.homedir(), '.ssh', 'id_rsa'),
             path.join(os.homedir(), '.ssh', 'id_ecdsa'),
+            path.join(os.homedir(), '.ssh', 'id_rsa'),
           ];
           for (const keyPath of defaultKeys) {
             if (fs.existsSync(keyPath)) {
-              logger.debug(`Using default key: ${keyPath}`);
-              sshConfig.privateKey = fs.readFileSync(keyPath);
-              break;
+              logger.debug(`[SSH] Using default key: ${keyPath}`);
+              try {
+                sshConfig.privateKey = fs.readFileSync(keyPath);
+                break;
+              } catch {
+                // 次のキーを試す
+              }
             }
+          }
+
+          if (!sshConfig.privateKey) {
+            logger.warn('[SSH] No SSH key found. Connection may fail without password auth.');
           }
         }
       }
 
-      logger.debug(`SSH connect: ${username}@${host}:${port}`);
+      logger.debug(`[SSH] Connecting: ${username}@${host}:${port}`);
       ssh.connect(sshConfig);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Private: mosh-server 起動
+  // -------------------------------------------------------------------------
+
+  /**
+   * SSH 経由で mosh-server を起動し、UDP ポートと鍵を返す。
+   *
+   * @param sshClient 接続済みの SSH クライアント
+   * @param opts mosh-server オプション
+   * @returns UDP ポートと AES-128 鍵（Base64）
+   */
+  private async _startMoshServer(
+    sshClient: SshClient,
+    opts: {
+      moshServerPath: string;
+      preferredUdpPort: number;
+    }
+  ): Promise<{ udpPort: number; key: string }> {
+    const { moshServerPath, preferredUdpPort } = opts;
+
+    return new Promise<{ udpPort: number; key: string }>((resolve, reject) => {
+      let output = '';
+      let resolved = false;
+
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          reject(new Error(
+            'mosh-server did not output "MOSH CONNECT" within 30s.\n' +
+            'Make sure mosh-server is installed on the remote host.\n' +
+            `Output: ${output.trim().substring(0, 500)}`
+          ));
+        }
+      }, 30_000);
+
+      // mosh-server 起動コマンド
+      // -s: stdout に "MOSH CONNECT ..." を出力するモード
+      // -p: 優先 UDP ポート
+      // --: 以降はリモートシェルへの引数
+      const moshCmd = [
+        moshServerPath,
+        'new',
+        '-s',
+        '-p', String(preferredUdpPort),
+        '--',
+        '/bin/bash',
+      ].join(' ');
+
+      logger.debug(`[mosh-server] Command: ${moshCmd}`);
+
+      sshClient.exec(moshCmd, { pty: false }, (err, stream) => {
+        if (err) {
+          clearTimeout(timeout);
+          reject(new Error(`Failed to start mosh-server: ${err.message}`));
+          return;
+        }
+
+        stream.on('data', (data: Buffer) => {
+          const text = data.toString('utf8');
+          output += text;
+          logger.trace(`[mosh-server] stdout: ${text.trim()}`);
+
+          const parsed = parseMoshConnect(output);
+          if (parsed && !resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            logger.info(`[mosh-server] Connected: UDP port=${parsed.udpPort}`);
+            resolve(parsed);
+          }
+        });
+
+        stream.stderr.on('data', (data: Buffer) => {
+          const text = data.toString('utf8');
+          logger.debug(`[mosh-server] stderr: ${text.trim()}`);
+        });
+
+        stream.on('close', (code: number | null) => {
+          if (!resolved) {
+            clearTimeout(timeout);
+            reject(new Error(
+              `mosh-server exited with code ${code} without outputting "MOSH CONNECT".\n` +
+              'Possible causes:\n' +
+              `  1. mosh-server not installed at: ${moshServerPath}\n` +
+              '  2. UDP port range blocked by firewall (60001-61000)\n' +
+              '  3. mosh-server version mismatch\n' +
+              `Output: ${output.trim().substring(0, 1000)}`
+            ));
+          }
+        });
+      });
     });
   }
 
@@ -476,11 +614,63 @@ class MoshRemoteAuthorityResolver implements vscode.RemoteAuthorityResolver {
 
   private _disposeAll(): void {
     for (const [authority, session] of this._sessions) {
-      logger.info(`Disposing session: ${authority}`);
+      logger.info(`[resolve] Disposing session: ${authority}`);
       session.dispose();
     }
     this._sessions.clear();
+    logger.info('[resolve] All sessions disposed');
   }
+}
+
+// ---------------------------------------------------------------------------
+// SSH エラーメッセージのヒューマナイズ
+// ---------------------------------------------------------------------------
+
+/**
+ * SSH エラーをユーザーフレンドリーなメッセージに変換する。
+ */
+function _makeSshErrorMessage(err: Error, host: string, port: number, username: string): string {
+  const msg = err.message.toLowerCase();
+
+  if (msg.includes('timeout') || msg.includes('timed out')) {
+    return (
+      `SSH connection to ${host}:${port} timed out.\n` +
+      'Possible causes:\n' +
+      '  1. Host is unreachable (check network / firewall)\n' +
+      `  2. SSH port ${port} is not open on the remote host\n` +
+      '  3. Connection is very slow (try increasing timeout in settings)'
+    );
+  }
+
+  if (msg.includes('authentication') || msg.includes('auth')) {
+    return (
+      `SSH authentication failed for ${username}@${host}.\n` +
+      'Possible causes:\n' +
+      '  1. SSH key not in authorized_keys on remote host\n' +
+      '  2. SSH agent not running (start with: eval $(ssh-agent) && ssh-add)\n' +
+      '  3. Wrong username or key file in settings\n' +
+      'Tip: Set "remoteMosh.identityFile" in VS Code settings to specify the key.'
+    );
+  }
+
+  if (msg.includes('refused') || msg.includes('econnrefused')) {
+    return (
+      `SSH connection refused by ${host}:${port}.\n` +
+      'Possible causes:\n' +
+      `  1. SSH server not running on ${host}\n` +
+      `  2. Wrong SSH port (currently: ${port})\n` +
+      '  3. Firewall is blocking the connection'
+    );
+  }
+
+  if (msg.includes('no such host') || msg.includes('enotfound')) {
+    return (
+      `Cannot resolve hostname: ${host}.\n` +
+      'Check that the hostname is correct and DNS is working.'
+    );
+  }
+
+  return `SSH connection to ${username}@${host}:${port} failed: ${err.message}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +682,7 @@ interface MoshSessionOpts {
   udpPort: number;
   keyBase64: string;
   mtu: number;
+  vsCodeServerInfo?: VsCodeServerInfo;
 }
 
 /**
@@ -505,6 +696,15 @@ class MoshSession {
 
   constructor(opts: MoshSessionOpts) {
     this._opts = opts;
+
+    if (opts.vsCodeServerInfo) {
+      logger.info(
+        `[MoshSession] VS Code Server: localhost:${opts.vsCodeServerInfo.port} ` +
+        `(token: ${opts.vsCodeServerInfo.connectionToken.substring(0, 8)}...)`
+      );
+    } else {
+      logger.warn('[MoshSession] No VS Code Server info available');
+    }
   }
 
   /**
@@ -513,23 +713,30 @@ class MoshSession {
    */
   async makeConnection(): Promise<vscode.ManagedMessagePassing> {
     if (this._disposed) {
-      throw new Error('MoshSession is already disposed');
+      throw new Error('MoshSession has been disposed');
     }
 
-    logger.info(
-      `makeConnection(): ${this._opts.host}:${this._opts.udpPort}`
-    );
+    logger.info(`[MoshSession] makeConnection(): ${this._opts.host}:${this._opts.udpPort}`);
 
-    // UDP + WASM クライアントを生成
-    const client = await MoshClientWrapper.connect({
-      host: this._opts.host,
-      udpPort: this._opts.udpPort,
-      keyBase64: this._opts.keyBase64,
-      mtu: this._opts.mtu,
-    });
-    this._client = client;
+    try {
+      const client = await MoshClientWrapper.connect({
+        host: this._opts.host,
+        udpPort: this._opts.udpPort,
+        keyBase64: this._opts.keyBase64,
+        mtu: this._opts.mtu,
+      });
+      this._client = client;
+      logger.info('[MoshSession] MoshClientWrapper connected ✓');
 
-    return new MoshMessagePassing(client);
+      return new MoshMessagePassing(client);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      logger.error('[MoshSession] makeConnection() failed:', errMsg);
+      throw new Error(
+        `Failed to establish mosh connection to ${this._opts.host}:${this._opts.udpPort}: ${errMsg}\n` +
+        'Make sure mosh-server is running and UDP port is accessible.'
+      );
+    }
   }
 
   dispose(): void {
@@ -537,8 +744,10 @@ class MoshSession {
       return;
     }
     this._disposed = true;
+    logger.info('[MoshSession] Disposing...');
     this._client?.end();
     this._client = undefined;
+    logger.info('[MoshSession] Disposed');
   }
 }
 
@@ -570,6 +779,8 @@ class MoshMessagePassing implements vscode.ManagedMessagePassing {
   readonly onDidClose: vscode.Event<Error | undefined>;
   readonly onDidEnd: vscode.Event<void>;
 
+  private _disposed = false;
+
   constructor(client: MoshClientWrapper) {
     this._client = client;
 
@@ -583,25 +794,31 @@ class MoshMessagePassing implements vscode.ManagedMessagePassing {
 
     // MoshClientWrapper のイベントを VS Code のイベントに変換
     client.on('data', (chunk: Uint8Array) => {
+      logger.trace(`[MoshMessagePassing] Received: ${chunk.length} bytes → VS Code`);
       this._onDidReceiveMessage.fire(chunk);
     });
+
     client.on('close', (err?: Error) => {
-      logger.info('mosh connection closed', err ? `(error: ${err.message})` : '');
+      const reason = err ? `error: ${err.message}` : 'clean';
+      logger.info(`[MoshMessagePassing] Connection closed (${reason})`);
       this._onDidClose.fire(err);
-      this._dispose();
+      this._disposeEmitters();
     });
+
     client.on('end', () => {
-      logger.info('mosh connection ended');
+      logger.info('[MoshMessagePassing] Connection ended (FIN received)');
       this._onDidEnd.fire();
-      this._dispose();
+      this._disposeEmitters();
     });
+
+    logger.info('[MoshMessagePassing] Created and event listeners attached');
   }
 
   /**
    * VS Code RPC データを mosh 経由でサーバーに送信する。
    */
   send(data: Uint8Array): void {
-    logger.trace(`MoshMessagePassing.send: ${data.length} bytes`);
+    logger.trace(`[MoshMessagePassing] send: ${data.length} bytes → mosh`);
     this._client.send(data);
   }
 
@@ -609,18 +826,22 @@ class MoshMessagePassing implements vscode.ManagedMessagePassing {
    * 接続を終了する。
    */
   end(): void {
-    logger.info('MoshMessagePassing.end() called');
+    logger.info('[MoshMessagePassing] end() called');
     this._client.end();
   }
 
   /**
-   * 送信バッファが空になるまで待つ（任意実装）。
+   * 送信バッファが空になるまで待つ。
    */
   drain(): Thenable<void> {
     return this._client.drain();
   }
 
-  private _dispose(): void {
+  private _disposeEmitters(): void {
+    if (this._disposed) {
+      return;
+    }
+    this._disposed = true;
     this._onDidReceiveMessage.dispose();
     this._onDidClose.dispose();
     this._onDidEnd.dispose();
