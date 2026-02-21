@@ -1,0 +1,3 @@
+[submodule "mosh-wasm"]
+	path = mosh-wasm
+	url = https://github.com/kojira/mosh-wasm
