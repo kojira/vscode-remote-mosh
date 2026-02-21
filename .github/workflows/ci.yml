@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      # ──────────────────────────────────────────────
+      # 1. チェックアウト
+      # ──────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ──────────────────────────────────────────────
+      # 2. Node.js 20 セットアップ
+      # ──────────────────────────────────────────────
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      # ──────────────────────────────────────────────
+      # 3. Rust ツールチェーン セットアップ
+      # ──────────────────────────────────────────────
+      - name: Setup Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # ──────────────────────────────────────────────
+      # 4. Rust キャッシュ
+      # ──────────────────────────────────────────────
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "${{ github.workspace }}/../mosh-wasm -> target"
+          cache-on-failure: true
+
+      # ──────────────────────────────────────────────
+      # 5. wasm-pack インストール
+      # ──────────────────────────────────────────────
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      # ──────────────────────────────────────────────
+      # 6. mosh-wasm ビルド
+      #    mosh-wasm リポジトリは別リポジトリのため、
+      #    ここでは mosh-wasm-pkg が既にコミット済みと仮定する。
+      #    mosh-wasm-pkg ディレクトリが存在しない場合は
+      #    サブモジュール or 手動クローンが必要。
+      # ──────────────────────────────────────────────
+      - name: Verify mosh-wasm-pkg exists
+        run: |
+          if [ ! -d "mosh-wasm-pkg" ]; then
+            echo "ERROR: mosh-wasm-pkg/ directory not found."
+            echo "mosh-wasm-pkg must be present in the repository."
+            echo "Run: ./build.sh from the mosh-wasm project, then copy the output."
+            exit 1
+          fi
+          echo "mosh-wasm-pkg contents:"
+          ls -lh mosh-wasm-pkg/
+
+      # ──────────────────────────────────────────────
+      # 7. npm 依存関係のインストール
+      # ──────────────────────────────────────────────
+      - name: Install npm dependencies
+        run: npm ci
+
+      # ──────────────────────────────────────────────
+      # 8. TypeScript コンパイル
+      # ──────────────────────────────────────────────
+      - name: Compile TypeScript
+        run: npm run compile
+
+      # ──────────────────────────────────────────────
+      # 9. テスト実行
+      # ──────────────────────────────────────────────
+      - name: Run tests
+        run: npm test
+
+      # ──────────────────────────────────────────────
+      # 10. .vsix パッケージビルド
+      # ──────────────────────────────────────────────
+      - name: Build .vsix package
+        run: npm run package
+
+      # ──────────────────────────────────────────────
+      # 11. .vsix を artifact としてアップロード
+      # ──────────────────────────────────────────────
+      - name: Upload .vsix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-remote-mosh-${{ github.sha }}
+          path: "*.vsix"
+          retention-days: 30
+          if-no-files-found: error
+
+  # ──────────────────────────────────────────────────────────────
+  # mosh-wasm を含む完全ビルド（mosh-wasm リポジトリが利用可能な場合）
+  # ──────────────────────────────────────────────────────────────
+  build-with-mosh-wasm:
+    name: Build with mosh-wasm (from source)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout vscode-remote-mosh
+        uses: actions/checkout@v4
+
+      - name: Checkout mosh-wasm
+        uses: actions/checkout@v4
+        with:
+          repository: kojira/mosh-wasm
+          path: _mosh-wasm
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "_mosh-wasm -> target"
+          cache-on-failure: true
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build mosh-wasm
+        working-directory: _mosh-wasm
+        run: |
+          wasm-pack build \
+            crates/mosh-wasm \
+            --target nodejs \
+            --out-dir ../../mosh-wasm-pkg \
+            --release
+
+      - name: Copy mosh-wasm-pkg to extension directory
+        run: |
+          rm -rf mosh-wasm-pkg
+          cp -r _mosh-wasm/mosh-wasm-pkg ./mosh-wasm-pkg
+          echo "mosh-wasm-pkg contents:"
+          ls -lh mosh-wasm-pkg/
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build .vsix package
+        run: npm run package
+
+      - name: Upload .vsix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-remote-mosh-full-${{ github.sha }}
+          path: "*.vsix"
+          retention-days: 30
+          if-no-files-found: error
