@@ -108,13 +108,19 @@ jobs:
         run: npm test
 
       # ──────────────────────────────────────────────
-      # 12. .vsix パッケージビルド
+      # 12. webpack バンドル (dist/ に生成)
       # ──────────────────────────────────────────────
-      - name: Build .vsix package
+      - name: Bundle with webpack
         run: npm run package
 
       # ──────────────────────────────────────────────
-      # 13. .vsix を artifact としてアップロード
+      # 13. .vsix パッケージ作成
+      # ──────────────────────────────────────────────
+      - name: Package .vsix
+        run: npx vsce package --no-dependencies
+
+      # ──────────────────────────────────────────────
+      # 14. .vsix を artifact としてアップロード
       # ──────────────────────────────────────────────
       - name: Upload .vsix artifact
         uses: actions/upload-artifact@v4

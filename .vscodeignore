@@ -21,9 +21,13 @@ node_modules/
 !node_modules/nan/
 !node_modules/nan/**
 
+# Submodule (Rust/WASM source - not needed in extension)
+mosh-wasm/
+
 # Misc
 .gitignore
 .gitattributes
+.gitmodules
 *.vsix
 *.map
 CHANGELOG.md
