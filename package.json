@@ -35,6 +35,40 @@
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "commands": [
+      {
+        "command": "remoteMosh.connect",
+        "title": "Remote-Mosh: Connect to Host...",
+        "category": "Remote-Mosh",
+        "icon": "$(remote)"
+      },
+      {
+        "command": "remoteMosh.disconnect",
+        "title": "Remote-Mosh: Disconnect",
+        "category": "Remote-Mosh",
+        "icon": "$(close)"
+      },
+      {
+        "command": "remoteMosh.showLog",
+        "title": "Remote-Mosh: Show Log",
+        "category": "Remote-Mosh",
+        "icon": "$(output)"
+      }
+    ],
+    "menus": {
+      "statusBar/remoteIndicator": [
+        {
+          "command": "remoteMosh.connect",
+          "when": "remoteName != 'mosh'",
+          "group": "remote_1_ssh@2"
+        },
+        {
+          "command": "remoteMosh.disconnect",
+          "when": "remoteName == 'mosh'",
+          "group": "remote_1_ssh@2"
+        }
+      ]
+    },
     "configuration": {
       "title": "Remote - Mosh",
       "properties": {

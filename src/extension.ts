@@ -36,9 +36,57 @@ import * as path from 'path';
 // Extension Lifecycle
 // ---------------------------------------------------------------------------
 
+/** アクティブな接続のステータスバーアイテム */
+let _statusBarItem: vscode.StatusBarItem | undefined;
+
+/** 現在の接続ホスト */
+let _connectedHost: string | undefined;
+
+/**
+ * ステータスバーアイテムを更新する。
+ * @param state 'connecting' | 'connected' | 'disconnected'
+ * @param host 接続先ホスト名
+ */
+function updateStatusBar(
+  state: 'connecting' | 'connected' | 'disconnected',
+  host?: string
+): void {
+  if (!_statusBarItem) {
+    return;
+  }
+  switch (state) {
+    case 'connecting':
+      _statusBarItem.text = `$(loading~spin) Mosh: Connecting to ${host ?? '...'}`;
+      _statusBarItem.tooltip = `Connecting to ${host ?? 'remote host'} via Mosh`;
+      _statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+      _statusBarItem.show();
+      break;
+    case 'connected':
+      _statusBarItem.text = `$(remote) Mosh: ${host ?? 'Connected'}`;
+      _statusBarItem.tooltip = `Connected to ${host ?? 'remote host'} via Mosh\nClick to show log`;
+      _statusBarItem.backgroundColor = undefined;
+      _statusBarItem.show();
+      break;
+    case 'disconnected':
+      _statusBarItem.text = `$(remote) Mosh`;
+      _statusBarItem.tooltip = 'Remote - Mosh: Not connected';
+      _statusBarItem.backgroundColor = undefined;
+      _statusBarItem.hide();
+      break;
+  }
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   initLogger(context);
   logger.info('Remote-Mosh extension activating...');
+
+  // ステータスバーアイテムを作成（右側に表示）
+  _statusBarItem = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Left,
+    100
+  );
+  _statusBarItem.command = 'remoteMosh.showLog';
+  context.subscriptions.push(_statusBarItem);
 
   // RemoteAuthorityResolver を登録
   const resolver = new MoshRemoteAuthorityResolver(context);
@@ -53,11 +101,131 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  // コマンド: Mosh ホストに接続
+  context.subscriptions.push(
+    vscode.commands.registerCommand('remoteMosh.connect', async () => {
+      await _cmdConnect();
+    })
+  );
+
+  // コマンド: 現在の Mosh 接続を切断
+  context.subscriptions.push(
+    vscode.commands.registerCommand('remoteMosh.disconnect', async () => {
+      await _cmdDisconnect();
+    })
+  );
+
+  // リモートセッション中のステータスバー表示
+  if (vscode.env.remoteName === 'mosh') {
+    _connectedHost = vscode.env.remoteAuthority?.replace(/^mosh\+/, '') ?? 'remote';
+    updateStatusBar('connected', _connectedHost);
+  }
+
   logger.info('Remote-Mosh extension activated. Authority prefix: mosh');
 }
 
 export function deactivate(): void {
   logger.info('Remote-Mosh extension deactivating...');
+  _statusBarItem?.dispose();
+  _statusBarItem = undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Connect コマンド実装（QuickPick UI）
+// ---------------------------------------------------------------------------
+
+/**
+ * 接続先ホストを QuickPick で選択し、VS Code リモートウィンドウを開く。
+ *
+ * 入力形式（QuickPick で受付）:
+ *   - `hostname`
+ *   - `user@hostname`
+ *   - `user@hostname:port`
+ */
+async function _cmdConnect(): Promise<void> {
+  const config = getMoshConfig();
+
+  // --- Step 1: ホスト入力 ---
+  // 最近接続したホストの履歴（workspaceState に保存）
+  // ※ activate スコープ外なので context は使えない。globalState はリゾルバー経由。
+  // シンプルに QuickPick で自由入力のみサポート。
+  const hostInput = await vscode.window.showInputBox({
+    title: 'Remote - Mosh: Connect to Host',
+    prompt: 'Enter hostname (user@host, user@host:port, or host)',
+    placeHolder: `e.g. ${config.defaultUser}@example.com`,
+    validateInput: (val) => {
+      if (!val || val.trim().length === 0) {
+        return 'Hostname is required';
+      }
+      // 最低限ホスト名部分が存在するか確認
+      const trimmed = val.trim();
+      const hostPart = trimmed.includes('@') ? trimmed.split('@').pop() : trimmed;
+      if (!hostPart || hostPart.replace(/:\d+$/, '').trim().length === 0) {
+        return 'Invalid hostname format';
+      }
+      return undefined; // valid
+    },
+  });
+
+  if (!hostInput) {
+    // キャンセル
+    return;
+  }
+
+  const trimmedHost = hostInput.trim();
+
+  // --- Step 2: フォルダパス入力 ---
+  const folderPath = await vscode.window.showInputBox({
+    title: 'Remote - Mosh: Remote Folder',
+    prompt: 'Enter the remote folder path to open',
+    placeHolder: '/home/' + config.defaultUser,
+    value: '/home/' + (
+      trimmedHost.includes('@') ? trimmedHost.split('@')[0] : config.defaultUser
+    ),
+  });
+
+  if (folderPath === undefined) {
+    // キャンセル
+    return;
+  }
+
+  const remotePath = folderPath.trim() || '/';
+
+  // --- Step 3: VS Code リモートウィンドウを開く ---
+  // authority 形式: `mosh+user@hostname` or `mosh+user@hostname:port`
+  const authority = `mosh+${trimmedHost}`;
+  const uri = vscode.Uri.parse(`vscode-remote://${authority}${remotePath}`);
+
+  logger.info(`Opening remote folder: ${uri.toString()}`);
+  updateStatusBar('connecting', trimmedHost);
+
+  try {
+    await vscode.commands.executeCommand('vscode.openFolder', uri, {
+      forceNewWindow: true,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('Failed to open remote folder:', message);
+    vscode.window.showErrorMessage(`Remote - Mosh: Failed to connect to ${trimmedHost}: ${message}`);
+    updateStatusBar('disconnected');
+  }
+}
+
+/**
+ * 現在の Mosh 接続を切断してローカルウィンドウに戻る。
+ */
+async function _cmdDisconnect(): Promise<void> {
+  const answer = await vscode.window.showWarningMessage(
+    `Disconnect from ${_connectedHost ?? 'remote host'} via Mosh?`,
+    { modal: true },
+    'Disconnect'
+  );
+  if (answer === 'Disconnect') {
+    logger.info('User requested disconnect from mosh session');
+    updateStatusBar('disconnected');
+    // リモートウィンドウを閉じてローカルに戻る
+    await vscode.commands.executeCommand('workbench.action.remote.close');
+  }
 }
 
 // ---------------------------------------------------------------------------

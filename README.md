@@ -1,6 +1,6 @@
 # Remote - Mosh
 
-> **⚠️ Preview / Work In Progress**: This extension is under active development. The WASM-based mosh transport is not yet complete.
+> **⚠️ Preview / Alpha**: This extension is under active development. Core SSH→mosh transport is implemented; VS Code Server integration is next.
 
 Open any folder on a remote machine over **[Mosh (Mobile Shell)](https://mosh.org)** — survives network drops, Wi-Fi → LTE roaming, and sleeps without losing your VS Code session.
 
@@ -8,12 +8,20 @@ Open any folder on a remote machine over **[Mosh (Mobile Shell)](https://mosh.or
 
 | Feature | Status |
 |---------|--------|
-| Remote file editing via VS Code Server | 🚧 In Progress |
-| LSP (code completion, diagnostics) | 🚧 In Progress |
-| Integrated terminal | 🚧 In Progress |
-| Network roaming (Wi-Fi → LTE, IP change) | 🚧 In Progress |
-| Auto-reconnect after sleep/suspend | 🚧 In Progress |
-| Transparent mosh SSP over UDP | 🚧 In Progress (WASM) |
+| SSH connection → mosh-server launch flow | ✅ Implemented |
+| `MOSH CONNECT <port> <key>` parsing | ✅ Implemented |
+| UDP socket bridge (dgram + WASM) | ✅ Implemented |
+| AES-128-OCB3 encryption via Rust/WASM | ✅ Implemented |
+| 50ms heartbeat / retransmit timer | ✅ Implemented |
+| ManagedMessagePassing (VS Code RPC bridge) | ✅ Implemented |
+| Connect command with QuickPick UI | ✅ Implemented |
+| Status bar connection indicator | ✅ Implemented |
+| Error handling (timeout / auth failure / port busy) | ✅ Implemented |
+| Auto-reconnect after sleep/suspend | ✅ Implemented (via VS Code resolver retry) |
+| Network roaming (Wi-Fi → LTE, IP change) | ✅ Implemented (mosh SSP handles transparently) |
+| Remote file editing via VS Code Server | 🚧 In Progress (next phase) |
+| LSP (code completion, diagnostics) | 🚧 In Progress (next phase) |
+| Integrated terminal | 🚧 In Progress (next phase) |
 
 ## Architecture
 
